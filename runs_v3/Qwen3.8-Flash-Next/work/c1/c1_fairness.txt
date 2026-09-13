@@ -1,0 +1,3 @@
+ConnectionPool (FIFO queue): 0/40 trials violated strict FIFO
+NaivePool (Condition/notify): 0/40 trials violated strict FIFO
+BargingPool (shared event, no queue): 27/40 trials violated strict FIFO   first bad order: ['w2', 'J2', 'w0', 'w1', 'J1']

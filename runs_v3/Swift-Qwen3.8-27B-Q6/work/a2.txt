@@ -1,0 +1,68 @@
+# Write path for a three-region order service
+
+## Assumptions
+
+1. An order belongs to exactly one customer, and each customer has exactly one home region (Frankfurt, Virginia, or Singapore). No order spans regions.
+2. The p99 80 ms write-latency budget is measured at the API edge of the region that accepts the write, from request receipt to the acceptance response.
+3. "Once accepted, an order must never be lost" means: after the API returns an acceptance, the order survives any single-region failure and is eventually visible in all three regions.
+4. Home-region reads are strongly consistent with local writes. Non-home-region reads are served from asynchronously replicated copies and may lag by seconds; the API discloses staleness.
+5. Inter-region replication is asynchronous, log-based (CDC from the home region's write log), at-least-once, with idempotent apply and per-order sequence numbers.
+6. Order identifiers are globally unique (region-scoped ULIDs), so replicated orders never collide.
+7. A region being "isolated" means it cannot reach the other two regions but continues to serve its own traffic.
+8. The three regions run identical service versions; deployments are coordinated and canary-rolled.
+9. The write path may use a local durable log (for example Kafka with min.insync.replicas=2, acks=all) inside the home region; a local log append is assumed to complete in single-digit milliseconds at p99.
+10. Cross-region administrative reads (support, finance) have no latency budget and may go to the home region.
+
+## Data partitioning
+
+Partitioning is by customer, and the customer's home region is fixed at account creation and stored in a small, globally replicated routing table (customer id, home region, status). The routing table is the only globally writable state; it changes rarely (a customer re-homing is a planned migration, not a runtime event) and is replicated synchronously to all three regions because it is small and read on every request.
+
+Each region owns the full write path for the customers homed there. Order data lives in per-region Postgres, partitioned by customer id, so a customer's orders are contiguous and a single customer's writes are serialized by one region. There is no cross-region write ownership: a Virginia-homed customer's orders are only ever written in Virginia. This is what makes the failure behaviour simple, and it is the direct consequence of assumption 1.
+
+## The write path
+
+The write path is fully local to the home region; no inter-region round trip occurs on the hot path, which is the only way the 80 ms budget survives the 90–220 ms inter-region RTTs.
+
+1. The edge (regional API gateway) resolves the customer's home region from the routing table. If the request arrived in a non-home region, it is redirected to the home region's edge; the caller retries there. (Assumption 10's administrative paths are the exception.)
+2. The API validates the payload and requires an idempotency key scoped to the customer. A replayed key returns the original acceptance; a key reused with a different payload returns 409.
+3. The API assigns the order id and appends the order event to the region's local durable log (one topic per region, partitioned by customer id, min.insync.replicas=2, acks=all). The append is the commit point.
+4. The API returns 202 with the order id immediately after the log append. At p99 this is validation plus a local log append, comfortably inside 80 ms (assumption 9).
+5. A projector, running in the same region, consumes the log and materializes orders into Postgres (partitioned by customer id). Because the log is partitioned by customer, a customer's events are applied in order by a single projector partition, and the per-customer sequence number makes apply idempotent and reorder-safe.
+
+Durability argument: the order is durable the moment the log append is acknowledged by a quorum of local log replicas. A projector crash, a database failure, or even a full region failure cannot lose an accepted order: in the first two cases the log is replayed; in the third, the log ships with the region and is replicated to the other regions as soon as connectivity returns.
+
+## How reads are served
+
+Home-region reads go straight to the local Postgres and are strongly consistent: a customer in Virginia reads their orders from Virginia's database, which is the only writer. Non-home-region reads (for example a support console in Frankfurt viewing a Singapore customer) are served from a local read replica fed by CDC replication of the home region's log. The replica is a projection, never a writer. The read API includes the replica's lag; callers that need current state for a non-home customer are told to read the home region (assumptions 4 and 10). Because replication is log-based and per-customer ordered, a replica can never show a customer's orders out of sequence; it can only be behind.
+
+## Failure behaviour when a region is isolated
+
+Because only the home region writes, isolation cannot create divergent writes: there is no second writer to diverge from.
+
+- Isolated home region: it continues to accept writes and serve home reads normally. Its outbound replication buffers in the local log; nothing is lost. On reconnection, the log tail is shipped and applied idempotently in the other regions. The isolated region's own state is authoritative throughout.
+- Isolated non-home region: it serves reads from its last-replicated state, flagged as stale with the measured lag. Writes for customers homed elsewhere are redirected (and will fail if the home region is also unreachable); the isolated region simply cannot accept them, which is correct because it never had write authority.
+- If the home region fails permanently (not just isolated), the routing table is updated in a deliberate, operator-driven re-home: the customer's log tail is shipped to the new home region, which adopts the sequence numbers, and the routing table flips once the new home has caught up. Orders remain durable because the log moved with the customer. This is a rare, planned operation, not a runtime path.
+
+The key property: at no point do two regions believe they own the same customer's writes, so there is no split-brain write state to reconcile.
+
+## Public API contract
+
+Order creation:
+
+- `POST /v1/orders` with headers `Idempotency-Key` (required) and the customer's credentials. Body: the order payload.
+- `202 Accepted` with `{ "order_id": "...", "status": "accepted", "region": "virginia" }` once the log append is durable. This is the acceptance point of the never-lost guarantee.
+- `409 Conflict` if the idempotency key was used with a different payload.
+- `422 Unprocessable Entity` for validation failures (before any idempotency key is consumed).
+- `404 Not Found` if the customer is not homed to this region (the edge normally redirects; this is the fallback).
+
+Order status:
+
+- `GET /v1/orders/{order_id}` returns `{ "order_id", "status", "version", "region", "replica_lag_ms" }`. `version` is the per-order sequence number; `replica_lag_ms` is null for home-region reads.
+- `status` is a monotonic enum: `accepted -> confirmed -> shipped -> delivered`, with `cancelled` reachable from `accepted` or `confirmed`. Transitions are recorded as log events, so a replica can never show a status "newer" than the home region has committed.
+- `410 Gone` for orders older than the retention window.
+
+Contract invariants: an order id is globally unique and immutable; the same idempotency key always returns the same order; `version` strictly increases; a `202` response is the point of no return for durability (assumption 3).
+
+## Summary of the trade
+
+The design buys the 80 ms budget and the never-lost guarantee by making the home region the sole writer and by committing to a local durable log before responding. The price is that non-home reads are eventually consistent and that customer re-homing is a deliberate operational procedure. Both prices are explicit in the API contract, so callers can reason about them.

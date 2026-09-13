@@ -1,0 +1,76 @@
+
+========================================================================
+1. the reported project: accepted by the shipped resolver
+========================================================================
+
+project graph (model depends on codegen, codegen depends on model)
+  input: {'app': ['api', 'ui'], 'api': ['model'], 'ui': ['theme'], 'model': ['codegen', 'logger'], 'codegen': ['model'], 'logger': [], 'theme': []}
+  resolve_original : ACCEPTED -> ['codegen', 'logger', 'model', 'api', 'theme', 'ui', 'app']
+                     dependency violations: [('codegen', 'model', 'dep at 2 not before 0')]
+  resolve_fixed    : ValueError(cycle through model)
+
+========================================================================
+2. minimal reductions of the same defect
+========================================================================
+
+two-node cycle  {'a': ['b'], 'b': ['a']}
+  input: {'a': ['b'], 'b': ['a']}
+  resolve_original : ACCEPTED -> ['b', 'a']
+                     dependency violations: [('b', 'a', 'dep at 1 not before 0')]
+  resolve_fixed    : ValueError(cycle through a)
+
+self cycle      {'a': ['a']}
+  input: {'a': ['a']}
+  resolve_original : ACCEPTED -> ['a']
+                     dependency violations: [('a', 'a', 'dep at 0 not before 0')]
+  resolve_fixed    : ValueError(cycle through a)
+
+cycle behind a finished node  {'x': ['y'], 'y': [], 'p': ['q'], 'q': ['p']}
+  input: {'x': ['y'], 'y': [], 'p': ['q'], 'q': ['p']}
+  resolve_original : ACCEPTED -> ['y', 'x', 'q', 'p']
+                     dependency violations: [('q', 'p', 'dep at 3 not before 2')]
+  resolve_fixed    : ValueError(cycle through p)
+
+========================================================================
+3. why: the cycle branch is unreachable
+========================================================================
+  {'app': ['api', 'ui'], 'api': ['model'], 'ui': ['theme'], 'model': ['codegen', 'logger'], 'codegen': ['model'], 'logger': [], 'theme': []} seen-hits=7 stack-hits=0
+  {'a': ['b'], 'b': ['a']}                                               seen-hits=2 stack-hits=0
+  {'a': ['a']}                                                           seen-hits=1 stack-hits=0
+  {'a': ['b', 'c'], 'b': ['c'], 'c': ['b']}                              seen-hits=4 stack-hits=0
+  {'a': ['b'], 'b': ['c'], 'c': ['d'], 'd': ['b']}                       seen-hits=4 stack-hits=0
+  total over 5 cyclic graphs: 'node in seen' fired 18 times, 'node in stack' fired 0 times
+  resolve_original adds a node to `seen` *before* recursing, so every node
+  that is on the current path is already in `seen`; the `if node in seen:
+  return` test above it always wins and `raise ValueError(cycle ...)` is dead code.
+
+========================================================================
+4. sweep: does the fix regress correct graphs / catch cycles?
+========================================================================
+  random acyclic graphs: 300; Kahn flagged 0 as cyclic; orders valid for all nodes/edges -> original 300/300, fixed 300/300
+  random graphs with a flipped edge: 300; Kahn agrees 300 of them are cyclic (0 disputed)
+  rejected by resolver -> original 0/300, fixed 300/300
+
+dag   {'a': ['b','c'], 'b': ['d'], 'c': ['d'], 'd': []}
+  input: {'a': ['b', 'c'], 'b': ['d'], 'c': ['d'], 'd': []}
+  resolve_original : ACCEPTED -> ['d', 'b', 'c', 'a']
+                     dependency violations: none
+  resolve_fixed    : ['d', 'b', 'c', 'a']  (violations: none)
+
+cyclic twin (d -> b added)
+  input: {'a': ['b', 'c'], 'b': ['d'], 'c': ['d'], 'd': ['b']}
+  resolve_original : ACCEPTED -> ['d', 'b', 'c', 'a']
+                     dependency violations: [('d', 'b', 'dep at 1 not before 0')]
+  resolve_fixed    : ValueError(cycle through b)
+
+========================================================================
+5. other behaviour the fix keeps / changes deliberately
+========================================================================
+
+dependency missing as a key: {'a': ['b']}
+  input: {'a': ['b']}
+  resolve_original : ACCEPTED -> ['b', 'a']
+                     dependency violations: none
+  resolve_fixed    : ['b', 'a']  (violations: none)
+  fixed recursion limit untouched; sys.getrecursionlimit()=1000
+  deep chain of 199 nodes -> ['n198', 'n197', 'n196']... len=200

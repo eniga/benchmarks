@@ -1,0 +1,28 @@
+machine: python 3.14.6
+
+========================================================================
+correctness
+========================================================================
+  random + edge cases checked against the original: 414
+  mismatches (fast vs original, merge vs original): 0
+  size   20000: Fenwick == merge-sort: True (sum of all counts = 99445109)
+  size  200000: Fenwick == merge-sort: True (sum of all counts = 9994805908)
+  size     500: float input, original == Fenwick == merge == bisect: True
+  size    5000: float input, original == Fenwick == merge == bisect: True
+
+========================================================================
+timings (best of 3, same input for both versions)
+========================================================================
+          n     original s   replacement s
+       1000         0.0104         0.00051   (original reps=3)
+       2000         0.0437         0.00115   (original reps=3)
+       5000         0.2969         0.00374   (original reps=2)
+      10000         1.1920         0.00736   (original reps=1)
+      20000         4.7140         0.01530   (original reps=1)
+      50000  (not measured)         0.04091
+     200000  (not measured)         0.19478
+    1000000  (not measured)         1.42326
+
+  original: 10_000 -> 20_000 time ratio = 3.95 (quadratic behaviour confirmed)
+  original at 20_000 = 4.714s, so 200_000 (100x the input) projects to about 786 minutes
+  replacement at 20_000 = 15.3 ms

@@ -1,0 +1,4 @@
+iteration 0: LIFO pool correctly detected, hand-off order was ['lateB', 'lateA', 'q5', 'q4', 'q3', 'q2', 'q1', 'q0']
+iteration 1: LIFO pool correctly detected, hand-off order was ['lateB', 'lateA', 'q5', 'q4', 'q3', 'q2', 'q1', 'q0']
+iteration 2: LIFO pool correctly detected, hand-off order was ['lateB', 'lateA', 'q5', 'q4', 'q3', 'q2', 'q1', 'q0']
+detected 3 / 3

@@ -1,0 +1,66 @@
+# ADR: Data synchronisation strategy for the offline-first field app
+
+## Status
+
+Accepted.
+
+## Context
+
+Field technicians use an offline-first mobile app (phone and tablet) to edit job records. Constraints:
+
+- Each record is owned by exactly one technician, enforced by the backend at assignment time; two technicians never edit the same record.
+- One technician may use two devices and may edit the same record from both while offline.
+- Devices are offline for up to 72 hours.
+- A record is a flat set of about 40 independent fields (text, numbers, enums, timestamps) plus photo references; photos upload separately.
+- Regulator: every field change must be attributable to a named person with a server-assigned timestamp, and the stored change history must be human-readable during an audit without tooling.
+- Team: two mobile engineers, one backend engineer. No platform team.
+- Backend: Postgres 16 behind a REST API.
+
+The decision: the synchronisation strategy for offline record edits.
+
+## Options considered
+
+### Option 1: CRDT library
+
+Adopt a CRDT library so that concurrent edits from the two devices merge deterministically without a coordinator.
+
+Pros: convergence is guaranteed by construction; no server round-trip to resolve conflicts; well-studied semantics.
+
+Cons: the actual conflict surface is tiny: ownership is exclusive, so the only concurrency is between a technician's own two devices editing flat, independent fields. CRDTs earn their complexity in collaborative editing of shared structured content; for 40 independent scalar fields, per-field last-write-wins registers are already a CRDT, and a full library buys merge machinery we do not need. Worse: CRDT merge metadata is not human-readable, colliding with the regulator's auditability requirement, and the library does not by itself provide the attribution and server-timestamping the regulator requires.
+
+### Option 2: Server-authoritative last-write-wins per field, with an append-only change log
+
+Each field is an independent last-writer-wins register. The server is the single authority. Every edit from any device is recorded as an immutable change event: record id, field, old and new value, technician id, device id, device-local time, and a server-assigned sequence number and timestamp stamped at ingestion. The server applies events per field in deterministic order, resolving conflicts with last-write-wins. The change log itself is the audit trail.
+
+Pros: the conflict model matches the domain exactly (one owner, independent fields). The append-only log is trivially human-readable, directly satisfies the attribution and server-timestamp requirements, and doubles as the audit history. Deterministic server-side ordering removes all client-side merge logic from the mobile code, and Postgres is sufficient: a `change_log` table plus a current-state table, both keyed by record.
+
+Cons: last-write-wins can silently discard a field value (the tablet sets "status" while the 72-hour-stale phone overwrites it with an older value). Mitigations: per-field ordering by a hybrid logical clock (device time + logical counter + device id tie-break), so the later real-world edit wins deterministically; the discarded value is never lost, because both events remain in the log. The server must be available for sync; 72-hour offline windows are fine because edits queue locally and sync is a batch of idempotent events.
+
+### Option 3: Record-level optimistic concurrency with manual conflict resolution
+
+The client sends the whole record with a version number; the server rejects stale writes (409) and the user resolves conflicts field by field in the UI.
+
+Pros: no silent data loss; the user is in control; no new infrastructure.
+
+Cons: with 72-hour offline windows and two devices, conflicts are the norm, not the exception. Manual resolution in the field is poor UX and a compliance risk: a record stuck in "conflict" state may be edited with a stale value, and the resolution itself needs attribution and timestamps, doubling the audit surface. Record-level granularity is coarser than the domain: two devices editing different fields of the same record would conflict needlessly, and the merge UI is non-trivial work for two mobile engineers who already own offline storage.
+
+## Decision
+
+Adopt Option 2: server-authoritative per-field last-write-wins with an append-only change log.
+
+The ownership model removes the hard part (multi-writer collaboration), and the flat record shape makes per-field granularity natural. Option 2 is the only option whose audit trail is the primary data structure rather than a by-product, decisive given the regulator requirement. The known weakness of last-write-wins (silent discard) is contained by deterministic hybrid-logical-clock ordering: every discarded value remains visible in the log.
+
+## Consequences
+
+- Backend: add `change_log` (append-only, one row per field change, server-assigned `seq` and `server_ts`) and a current-state table; the sync endpoint accepts idempotent, batched events; per-field LWW apply by (hlc, device_id).
+- Mobile: local outbox of change events; sync is a batch upload plus a state pull; no merge UI, no CRDT dependency.
+- Attribution and audit are satisfied by construction; the log is readable without tooling.
+- Photos stay out of the change log (separate upload with references), keeping the log small and readable.
+- We accept that a stale device can overwrite a newer field value; the log makes this visible.
+
+## What would change the decision
+
+- If records ever become shared between technicians, Option 1 (a real CRDT) or Option 3 becomes preferable.
+- If the regulator required that no field value be overwritten without explicit human confirmation, Option 2's LWW would be insufficient.
+- If fields developed cross-field invariants, per-field independence would break and record-level concurrency (Option 3) would be needed.
+- If offline windows shrank to minutes, a simpler write-through design would suffice.

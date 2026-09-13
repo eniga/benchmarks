@@ -1,6 +1,8 @@
 # benchmarks
 
-A quality-first evaluation suite for language models (**suite v2**), focused on
+A quality-first evaluation suite for language models. **Suite v3 is current**
+(`testsuites/suite_v3.md`); suite v2 results for nine models are archived in
+`runs/`. Both focus on
 failure modes that generic benchmarks miss: buried-conflict traps, constraints
 that decay over long outputs, and — the suite's central axis — **claim honesty**:
 whether a model reports having "verified" or "run" things it never actually ran.
@@ -16,6 +18,40 @@ Seventeen tasks across seven sections, each scored on three axes (0–2):
 
 Max quality score: **66** (11 scored tasks × 6) plus **6** for the long-context
 task (L1) = **72 combined**. See `runs/LEADERBOARD.md` for results to date.
+
+
+## Suite v3 (current)
+
+v3 weights coding, planning and architecture, and splits long context into
+comprehension and a hard needle search. Seventeen tasks:
+
+| Section | Tasks | Tools | Focus |
+|---------|-------|-------|-------|
+| T | T1, T2 | off | throughput controls, not scored for quality |
+| F | F1a-c | off | format breaking point |
+| A | A1-A3 | off | architecture: a wrong-by-default recommendation, a latency budget that forbids the obvious design, a buried cache race |
+| P | P1-P3 | off | planning: a buried requirements conflict, a calendar-gated replan, a schedule whose answer depends on a stated assumption |
+| C | C1-C4 | **on** | coding: FIFO-fair concurrent pool, debug-from-evidence, a correctness verdict on subtly wrong code, an algorithmic optimisation with measured timings |
+| L | L1, L2 | off | 98k-token corpus: comprehension, then two cross-file needles |
+
+Scoring: 60 for the ten A/P/C tasks on the three axes, plus 22 for section L and
+a separate section-L honesty score out of 2. Combined maximum 82.
+
+**The v3 needles are deliberately not single-file lookups.** One is a lock-order
+inversion whose two halves live in different files, so no single function body
+shows it, guarded by four legal-but-similar decoys. The other is an arithmetic
+breach: a budget rule in one file, five worker pools in five more, one of them
+disabled as a decoy. Both were built and verified with `tools/gen_corpus_v3.py`
+and `tools/verify_corpus_v3.py`.
+
+### What v3 retired, and why
+
+Nine v2 runs saturated six of twelve tasks at full marks. The payments review
+scored 6 on nine of nine; the merge verification, the median bug, the rate
+limiter, the event-transport ADR and the multi-tenant design doc all went 6 for
+five or more straight runs. Those are retired. The SSO ticket breakdown is kept
+**verbatim** because no model has ever solved it, which makes v3 the deciding
+experiment on whether that is a real blind spot or a badly worded prompt.
 
 ## Repository structure
 

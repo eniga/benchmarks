@@ -1,0 +1,5 @@
+  chain of 199 edges     | original: ok, order length 200 | fixed: ok, order length 200
+  chain of 999 edges     | original: RecursionError | fixed: RecursionError
+  chain of 1000 edges    | original: RecursionError | fixed: RecursionError
+  chain of 2000 edges    | original: RecursionError | fixed: RecursionError
+  sys.getrecursionlimit() = 1000
